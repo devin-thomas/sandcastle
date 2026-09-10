@@ -406,7 +406,53 @@ WORKDIR /home/agent
 ENTRYPOINT ["sleep", "infinity"]
 `;
 
+const ANTIGRAVITY_DOCKERFILE = `FROM node:22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+  git \\
+  curl \\
+  jq \\
+  python3 \\
+  python3-pip \\
+  python3-venv \\
+  && rm -rf /var/lib/apt/lists/*
+
+{{ISSUE_TRACKER_TOOLS}}
+
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+USER \${AGENT_UID}:\${AGENT_GID}
+
+# Add local bin to PATH for agy
+ENV PATH="/home/agent/.local/bin:$PATH"
+
+WORKDIR /home/agent
+
+# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at \${SANDBOX_REPO_DIR}
+# and overrides the working directory to \${SANDBOX_REPO_DIR} at container start.
+# Structure your Dockerfile so that \${SANDBOX_REPO_DIR} can serve as the project root.
+ENTRYPOINT ["sleep", "infinity"]
+`;
+
 const AGENT_REGISTRY: AgentEntry[] = [
+  {
+    name: "antigravity",
+    label: "Google Antigravity",
+    defaultModel: "gemini-3.8-flash-high",
+    factoryImport: "antigravity",
+    dockerfileTemplate: ANTIGRAVITY_DOCKERFILE,
+    envExample: `# Google Antigravity authentication
+# Optional if authenticated with \`agy\` on host, or set GEMINI_API_KEY:
+GEMINI_API_KEY=`,
+    setupCommand: `agy -p "$(cat ${SETUP_ISSUE_TRACKER_PATH})" --dangerously-skip-permissions`,
+  },
   {
     name: "claude-code",
     label: "Claude Code",
@@ -577,7 +623,9 @@ export const getIssueTracker = (name: string): IssueTrackerEntry | undefined =>
   ISSUE_TRACKER_REGISTRY.find((b) => b.name === name);
 
 export const getAgent = (name: string): AgentEntry | undefined =>
-  AGENT_REGISTRY.find((a) => a.name === name);
+  AGENT_REGISTRY.find(
+    (a) => a.name === name || (name === "agy" && a.name === "antigravity"),
+  );
 
 // ---------------------------------------------------------------------------
 // Sandbox provider registry (internal — not part of public API)

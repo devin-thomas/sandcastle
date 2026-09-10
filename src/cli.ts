@@ -287,7 +287,7 @@ const initCommand = Command.make(
         const selected = yield* Effect.promise(() =>
           clack.select({
             message: "Select an agent:",
-            initialValue: "claude-code",
+            initialValue: "antigravity",
             options: agents.map((a) => ({
               value: a.name,
               label: a.label,

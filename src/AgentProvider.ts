@@ -1265,3 +1265,232 @@ export const claudeCode = (
     return undefined;
   },
 });
+
+// ---------------------------------------------------------------------------
+// Google Antigravity (agy) agent provider
+// ---------------------------------------------------------------------------
+
+const ANTIGRAVITY_TOOL_ARG_FIELDS: Record<string, string> = {
+  run_command: "CommandLine",
+  view_file: "AbsolutePath",
+  edit_file: "TargetFile",
+  replace_file_content: "TargetFile",
+  multi_replace_file_content: "TargetFile",
+  create_file: "TargetFile",
+  write_to_file: "TargetFile",
+  search_web: "query",
+  read_url_content: "Url",
+  find_file: "Pattern",
+  find_by_name: "Pattern",
+  search_directory: "Query",
+  grep_search: "Query",
+};
+
+const ANTIGRAVITY_DISPLAY_NAMES: Record<string, string> = {
+  run_command: "Bash",
+  view_file: "Read",
+  edit_file: "Edit",
+  replace_file_content: "Edit",
+  multi_replace_file_content: "Edit",
+  create_file: "Write",
+  write_to_file: "Write",
+  search_web: "WebSearch",
+  read_url_content: "WebFetch",
+  grep_search: "Grep",
+  find_by_name: "Find",
+};
+
+const parseAntigravityStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    const obj = JSON.parse(line);
+
+    // Initial event carries conversation_id
+    if (obj.event === "init" && typeof obj.conversation_id === "string") {
+      return [{ type: "session_id", sessionId: obj.conversation_id }];
+    }
+
+    // Step updates: text deltas or tool calls
+    if (
+      obj.event === "step_update" &&
+      obj.step_update &&
+      typeof obj.step_update === "object"
+    ) {
+      const update = obj.step_update;
+
+      // Agent response text delta
+      if (
+        update.step_type === "agent_response" &&
+        typeof update.text_delta === "string" &&
+        update.text_delta.length > 0
+      ) {
+        return [{ type: "text", text: update.text_delta }];
+      }
+
+      // Tool invocation start
+      if (update.step_type === "tool" && update.state === "ACTIVE") {
+        const rawName =
+          typeof update.tool_name === "string"
+            ? update.tool_name
+            : (update.tool_info?.name ?? "Tool");
+        const displayName = ANTIGRAVITY_DISPLAY_NAMES[rawName] ?? rawName;
+        const params =
+          update.tool_info?.parameters &&
+          typeof update.tool_info.parameters === "object"
+            ? update.tool_info.parameters
+            : {};
+        const argField = ANTIGRAVITY_TOOL_ARG_FIELDS[rawName];
+        let argValue = "";
+        if (argField && typeof params[argField] === "string") {
+          argValue = params[argField];
+        } else if (typeof params.CommandLine === "string") {
+          argValue = params.CommandLine;
+        } else if (typeof params.command === "string") {
+          argValue = params.command;
+        } else if (typeof params.TargetFile === "string") {
+          argValue = params.TargetFile;
+        } else if (typeof params.AbsolutePath === "string") {
+          argValue = params.AbsolutePath;
+        } else if (typeof params.query === "string") {
+          argValue = params.query;
+        } else {
+          argValue = JSON.stringify(params);
+        }
+        return [{ type: "tool_call", name: displayName, args: argValue }];
+      }
+    }
+
+    // Final result event
+    if (
+      obj.event === "result" &&
+      obj.result &&
+      typeof obj.result === "object"
+    ) {
+      const events: ParsedStreamEvent[] = [];
+      if (typeof obj.result.response === "string") {
+        events.push({ type: "result", result: obj.result.response });
+      }
+      if (obj.result.usage && typeof obj.result.usage === "object") {
+        const u = obj.result.usage;
+        const input = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+        const cached =
+          typeof u.cache_read_tokens === "number" ? u.cache_read_tokens : 0;
+        const output =
+          typeof u.output_tokens === "number" ? u.output_tokens : 0;
+        const thinking =
+          typeof u.thinking_tokens === "number" ? u.thinking_tokens : 0;
+        events.push({
+          type: "usage",
+          usage: {
+            inputTokens: Math.max(0, input - cached),
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: cached,
+            outputTokens: output + thinking,
+          },
+        });
+      }
+      return events;
+    }
+
+    // Error event
+    if (obj.event === "error" || obj.status === "ERROR") {
+      const msg = extractErrorMessage(obj);
+      return msg ? [{ type: "result", result: msg }] : [];
+    }
+  } catch {
+    // Not valid JSON — skip
+  }
+  return [];
+};
+
+export const parseAntigravitySessionUsage = (
+  content: string,
+): IterationUsage | undefined => {
+  const lines = content.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(line);
+      const u =
+        obj.event === "result"
+          ? obj.result?.usage
+          : (obj.usage ?? obj.step_update?.usage);
+      if (u && typeof u.output_tokens === "number") {
+        const input = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+        const cached =
+          typeof u.cache_read_tokens === "number" ? u.cache_read_tokens : 0;
+        const output = u.output_tokens;
+        const thinking =
+          typeof u.thinking_tokens === "number" ? u.thinking_tokens : 0;
+        return {
+          inputTokens: Math.max(0, input - cached),
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: cached,
+          outputTokens: output + thinking,
+        };
+      }
+    } catch {
+      // Not valid JSON — skip
+    }
+  }
+  return undefined;
+};
+
+/** Options for the Google Antigravity (agy) agent provider. */
+export interface AntigravityOptions {
+  /** Reasoning effort for the session ("low" | "medium" | "high"). */
+  readonly effort?: "low" | "medium" | "high";
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+  /** Execution mode (e.g. "accept-edits" or "plan"). */
+  readonly mode?: "accept-edits" | "plan";
+  /** When false, session capture is disabled. Default: false. */
+  readonly captureSessions?: boolean;
+}
+
+export const antigravity = (
+  model: string = "gemini-3.8-flash-high",
+  options?: AntigravityOptions,
+): AgentProvider => ({
+  name: "antigravity",
+  env: options?.env ?? {},
+  captureSessions: options?.captureSessions ?? false,
+
+  buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions,
+    resumeSession,
+  }: AgentCommandOptions): PrintCommand {
+    const allowAll = dangerouslySkipPermissions
+      ? " --dangerously-skip-permissions"
+      : "";
+    const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
+    const modeFlag = options?.mode ? ` --mode ${options.mode}` : "";
+    const resumeFlag = resumeSession
+      ? ` --conversation ${shellEscape(resumeSession)}`
+      : "";
+    return {
+      command: `agy --output-format stream-json --model ${shellEscape(model)}${allowAll}${effortFlag}${modeFlag}${resumeFlag}`,
+      stdin: prompt,
+    };
+  },
+
+  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+    const args = ["agy", "--model", model];
+    if (options?.effort) args.push("--effort", options.effort);
+    if (options?.mode) args.push("--mode", options.mode);
+    if (prompt) args.push("-i", prompt);
+    return args;
+  },
+
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseAntigravityStreamLine(line);
+  },
+
+  parseSessionUsage(content: string): IterationUsage | undefined {
+    return parseAntigravitySessionUsage(content);
+  },
+});
+
+export const agy = antigravity;
