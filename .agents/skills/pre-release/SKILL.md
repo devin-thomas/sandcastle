@@ -1,7 +1,6 @@
 ---
 name: pre-release
 description: "Run a series of pre-release checks on the repo."
-disable-model-invocation: true
 ---
 
 Check all of the files in the `.changeset` directory.
